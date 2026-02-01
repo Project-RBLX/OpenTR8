@@ -1,0 +1,646 @@
+// OpenTR8 Database Schema
+// Escrow platform for autonomous AI agents
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// AGENT MANAGEMENT
+// ============================================================================
+
+model Agent {
+  id          String   @id @default(uuid())
+  name        String
+  apiKey      String   @unique
+  apiKeyHash  String   // Hashed version for secure comparison
+
+  // Wallet balance (in smallest unit, e.g., cents)
+  balance     BigInt   @default(0)
+
+  // Metadata
+  metadata    Json?    // Flexible metadata (e.g., OpenClaw agent ID, capabilities)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  createdTasks   Task[]        @relation("TaskRequester")
+  acceptedTasks  Task[]        @relation("TaskWorker")
+  transactions   Transaction[]
+  webhooks       Webhook[]
+  reputation     Reputation?
+  bids           Bid[]         // Bids made by this agent
+
+  // Template relations
+  createdTemplates TaskTemplate[] @relation("TemplateCreator")
+
+  // Dispute relations
+  initiatedDisputes   Dispute[]         @relation("DisputeInitiator")
+  arbitratedDisputes  Dispute[]         @relation("DisputeArbiter")
+  disputeEvidence     DisputeEvidence[]
+  disputeComments     DisputeComment[]
+
+  // Multi-party task relations
+  organizedMultiPartyTasks  MultiPartyTask[]        @relation("MultiPartyOrganizer")
+  multiPartyParticipations  MultiPartyParticipant[] @relation("MultiPartyParticipant")
+
+  @@index([apiKeyHash])
+}
+
+// ============================================================================
+// REPUTATION SYSTEM
+// ============================================================================
+
+enum ReputationTier {
+  NEW       // <5 tasks
+  BRONZE    // 5+ tasks
+  SILVER    // 20+ tasks, >90% success
+  GOLD      // 50+ tasks, >95% success, >10k volume
+  PLATINUM  // 100+ tasks, >98% success, >100k volume
+}
+
+model Reputation {
+  id                String         @id @default(uuid())
+
+  // Link to agent
+  agentId           String         @unique
+  agent             Agent          @relation(fields: [agentId], references: [id])
+
+  // Worker stats
+  tasksCompleted    Int            @default(0)  // Tasks completed as worker
+  tasksApproved     Int            @default(0)  // Tasks approved (successful)
+  tasksDisputed     Int            @default(0)  // Tasks disputed
+
+  // Requester stats
+  tasksRequested    Int            @default(0)  // Tasks created as requester
+  tasksCancelled    Int            @default(0)  // Tasks cancelled by requester
+  tasksExpired      Int            @default(0)  // Tasks expired
+
+  // Calculated rates (0.0 - 1.0)
+  successRate       Float          @default(0)  // approved / completed
+  disputeRate       Float          @default(0)  // disputed / total
+
+  // Response time
+  avgResponseTime   Float          @default(0)  // Average hours to accept a task
+  totalResponseTime Float          @default(0)  // Sum of response times (for calculating avg)
+  tasksAccepted     Int            @default(0)  // Number of tasks accepted (for calculating avg)
+
+  // Volume tracking (in smallest unit)
+  totalVolumeEarned BigInt         @default(0)  // Total credits earned as worker
+  totalVolumeSpent  BigInt         @default(0)  // Total credits spent as requester
+
+  // Tier
+  tier              ReputationTier @default(NEW)
+
+  // Timestamps
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@index([tier])
+  @@index([totalVolumeEarned])
+  @@index([successRate])
+}
+
+// ============================================================================
+// TASK & ESCROW
+// ============================================================================
+
+enum TaskStatus {
+  OPEN          // Available for acceptance
+  IN_PROGRESS   // Accepted by worker
+  COMPLETED     // Worker marked complete, awaiting approval
+  APPROVED      // Requester approved, credits released
+  CANCELLED     // Cancelled by requester (before acceptance)
+  EXPIRED       // Deadline passed, auto-released to worker
+  DISPUTED      // Under dispute (future feature)
+}
+
+enum TaskVisibility {
+  PRIVATE       // Only visible to assigned worker or direct link
+  PUBLIC        // Visible in marketplace
+}
+
+model Task {
+  id            String         @id @default(uuid())
+
+  // Task details
+  description   String
+  credits       BigInt         // Amount in smallest unit
+  deadline      DateTime       // Auto-release after this time
+
+  // Status
+  status        TaskStatus     @default(OPEN)
+
+  // Visibility for marketplace
+  visibility    TaskVisibility @default(PRIVATE)
+
+  // Participants
+  requesterId   String
+  requester     Agent          @relation("TaskRequester", fields: [requesterId], references: [id])
+
+  workerId      String?
+  worker        Agent?         @relation("TaskWorker", fields: [workerId], references: [id])
+
+  // Escrow
+  escrow        Escrow?
+
+  // Dispute (one-to-one)
+  dispute       Dispute?
+
+  // Bids on the task (for marketplace)
+  bids          Bid[]
+
+  // Template reference (if created from a template)
+  templateId    String?
+  template      TaskTemplate?  @relation(fields: [templateId], references: [id])
+
+  // Metadata
+  metadata      Json?          // Flexible task metadata (e.g., skill requirements)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  acceptedAt    DateTime?
+  completedAt   DateTime?
+  approvedAt    DateTime?
+
+  @@index([status])
+  @@index([requesterId])
+  @@index([workerId])
+  @@index([deadline])
+  @@index([visibility, status])
+  @@index([templateId])
+}
+
+enum EscrowStatus {
+  LOCKED        // Credits locked, awaiting completion
+  RELEASED      // Credits released to worker
+  REFUNDED      // Credits refunded to requester
+}
+
+model Escrow {
+  id          String       @id @default(uuid())
+
+  // Link to task
+  taskId      String       @unique
+  task        Task         @relation(fields: [taskId], references: [id])
+
+  // Amount held
+  amount      BigInt
+
+  // Status
+  status      EscrowStatus @default(LOCKED)
+
+  // Timestamps
+  createdAt   DateTime     @default(now())
+  releasedAt  DateTime?
+
+  @@index([status])
+}
+
+// ============================================================================
+// BIDS (MARKETPLACE)
+// ============================================================================
+
+enum BidStatus {
+  PENDING       // Bid awaiting response
+  ACCEPTED      // Bid accepted by requester
+  REJECTED      // Bid rejected by requester
+  WITHDRAWN     // Bid withdrawn by bidder
+}
+
+model Bid {
+  id          String    @id @default(uuid())
+
+  // Link to task
+  taskId      String
+  task        Task      @relation(fields: [taskId], references: [id])
+
+  // Bidder (the agent making the bid)
+  bidderId    String
+  bidder      Agent     @relation(fields: [bidderId], references: [id])
+
+  // Bid details
+  amount      BigInt    // Proposed credits for the task
+  message     String?   // Optional message explaining the bid
+
+  // Status
+  status      BidStatus @default(PENDING)
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([taskId, bidderId]) // One bid per agent per task
+  @@index([taskId])
+  @@index([bidderId])
+  @@index([status])
+}
+
+// ============================================================================
+// TRANSACTIONS
+// ============================================================================
+
+enum TransactionType {
+  CREDIT          // Initial credit grant
+  LOCK            // Credits locked for escrow
+  UNLOCK          // Credits unlocked (refund)
+  EARN            // Credits earned from completed task
+  WITHDRAWAL      // Credits withdrawn (future)
+  DEPOSIT         // Credits deposited (future)
+}
+
+model Transaction {
+  id          String          @id @default(uuid())
+
+  // Agent
+  agentId     String
+  agent       Agent           @relation(fields: [agentId], references: [id])
+
+  // Transaction details
+  type        TransactionType
+  amount      BigInt          // Positive for credit, negative for debit
+  balance     BigInt          // Balance after transaction
+
+  // Reference
+  taskId      String?         // Related task (if applicable)
+  description String?
+
+  // Metadata
+  metadata    Json?
+  createdAt   DateTime        @default(now())
+
+  @@index([agentId])
+  @@index([taskId])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// IDEMPOTENCY
+// ============================================================================
+
+model IdempotencyKey {
+  key         String   @id
+  response    Json?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+// ============================================================================
+// WEBHOOKS
+// ============================================================================
+
+model Webhook {
+  id          String    @id @default(uuid())
+
+  // Agent who owns this webhook
+  agentId     String
+  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  // Webhook configuration
+  url         String    // Target URL for webhook delivery
+  events      String[]  // Events to subscribe to (e.g., ["task.created", "task.completed"])
+  secret      String    // HMAC secret for signature verification
+
+  // Status
+  active      Boolean   @default(true)
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Deliveries
+  deliveries  WebhookDelivery[]
+
+  @@index([agentId])
+  @@index([active])
+}
+
+enum WebhookDeliveryStatus {
+  PENDING     // Awaiting delivery
+  SUCCESS     // Delivered successfully (2xx response)
+  FAILED      // All retry attempts failed
+}
+
+model WebhookDelivery {
+  id            String                @id @default(uuid())
+
+  // Webhook reference
+  webhookId     String
+  webhook       Webhook               @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  // Event details
+  event         String                // Event type (e.g., "task.created")
+  payload       Json                  // Full payload sent
+
+  // Delivery status
+  status        WebhookDeliveryStatus @default(PENDING)
+  attempts      Int                   @default(0)
+  lastAttemptAt DateTime?
+  response      Json?                 // Last response/error details
+
+  // Timestamps
+  createdAt     DateTime              @default(now())
+
+  @@index([webhookId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// DISPUTES
+// ============================================================================
+
+enum DisputeStatus {
+  OPENED        // Dispute just opened, either party can submit evidence
+  EVIDENCE      // Evidence submission period (review period)
+  ARBITRATION   // Arbiter assigned and reviewing
+  RESOLVED      // Dispute resolved, escrow distributed
+}
+
+enum DisputeResolution {
+  REQUESTER_WINS  // Full refund to requester
+  WORKER_WINS     // Full release to worker
+  SPLIT           // 50/50 split between parties
+}
+
+model Dispute {
+  id            String            @id @default(uuid())
+
+  // Link to task (one dispute per task)
+  taskId        String            @unique
+  task          Task              @relation(fields: [taskId], references: [id])
+
+  // Status
+  status        DisputeStatus     @default(OPENED)
+
+  // Initiator (requester or worker)
+  initiatorId   String
+  initiator     Agent             @relation("DisputeInitiator", fields: [initiatorId], references: [id])
+
+  // Reason for dispute
+  reason        String
+
+  // Resolution
+  resolution    DisputeResolution?
+  arbiterId     String?
+  arbiter       Agent?            @relation("DisputeArbiter", fields: [arbiterId], references: [id])
+
+  // Timestamps
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  resolvedAt    DateTime?
+
+  // Relations
+  evidence      DisputeEvidence[]
+  comments      DisputeComment[]
+
+  @@index([status])
+  @@index([initiatorId])
+}
+
+model DisputeEvidence {
+  id            String    @id @default(uuid())
+
+  // Link to dispute
+  disputeId     String
+  dispute       Dispute   @relation(fields: [disputeId], references: [id])
+
+  // Submitter
+  submittedById String
+  submittedBy   Agent     @relation(fields: [submittedById], references: [id])
+
+  // Content
+  content       String
+  attachments   String[]  @default([])
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+
+  @@index([disputeId])
+  @@index([submittedById])
+}
+
+model DisputeComment {
+  id            String    @id @default(uuid())
+
+  // Link to dispute
+  disputeId     String
+  dispute       Dispute   @relation(fields: [disputeId], references: [id])
+
+  // Author
+  authorId      String
+  author        Agent     @relation(fields: [authorId], references: [id])
+
+  // Content
+  content       String
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+
+  @@index([disputeId])
+  @@index([authorId])
+}
+
+// ============================================================================
+// TASK TEMPLATES
+// ============================================================================
+
+model TaskTemplate {
+  id                  String    @id @default(uuid())
+
+  // Template identification
+  name                String
+  description         String?
+  category            String    // Category from TEMPLATE_CATEGORIES
+
+  // JSON Schema definitions
+  inputSchema         Json      // JSON Schema for task input validation
+  outputSchema        Json      // JSON Schema for deliverables validation
+
+  // Default values
+  defaultCredits      BigInt    @default(0)  // Default credit amount for tasks
+  defaultDeadlineHours Int      @default(72) // Default deadline in hours
+
+  // Visibility
+  isPublic            Boolean   @default(false) // Community vs private templates
+
+  // Creator
+  creatorId           String
+  creator             Agent     @relation("TemplateCreator", fields: [creatorId], references: [id])
+
+  // Usage tracking
+  usageCount          Int       @default(0) // How many times this template has been used
+
+  // Tasks created from this template
+  tasks               Task[]
+
+  // Timestamps
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([category])
+  @@index([isPublic])
+  @@index([creatorId])
+  @@index([usageCount])
+}
+
+// ============================================================================
+// MULTI-PARTY ESCROW
+// ============================================================================
+
+enum MultiPartyTaskStatus {
+  OPEN          // Task created, awaiting participants to accept
+  IN_PROGRESS   // All required participants accepted, work in progress
+  COMPLETED     // All participants completed their work
+  DISTRIBUTED   // Credits have been distributed
+  CANCELLED     // Cancelled by organizer (before completion)
+  EXPIRED       // Deadline passed
+}
+
+enum MultiPartyRole {
+  ORGANIZER     // The agent coordinating the task
+  WORKER        // An agent performing work on the task
+  REVIEWER      // An agent reviewing work (optional)
+}
+
+enum MultiPartyParticipantStatus {
+  PENDING       // Invitation sent, awaiting response
+  ACCEPTED      // Participant accepted the invitation
+  DECLINED      // Participant declined the invitation
+  COMPLETED     // Participant completed their work
+  PAID          // Participant has been paid
+}
+
+model MultiPartyTask {
+  id            String               @id @default(uuid())
+
+  // Task details
+  description   String
+  totalCredits  BigInt               // Total amount in escrow
+
+  // Status
+  status        MultiPartyTaskStatus @default(OPEN)
+
+  // Organizer (the agent coordinating the task)
+  organizerId   String
+  organizer     Agent                @relation("MultiPartyOrganizer", fields: [organizerId], references: [id])
+
+  // Deadline for task completion
+  deadline      DateTime
+
+  // Metadata
+  metadata      Json?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  // Relations
+  participants  MultiPartyParticipant[]
+  escrow        MultiPartyEscrow?
+  milestones    MultiPartyMilestone[]
+
+  @@index([status])
+  @@index([organizerId])
+  @@index([deadline])
+}
+
+model MultiPartyParticipant {
+  id            String                       @id @default(uuid())
+
+  // Link to task
+  taskId        String
+  task          MultiPartyTask               @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Link to agent
+  agentId       String
+  agent         Agent                        @relation("MultiPartyParticipant", fields: [agentId], references: [id])
+
+  // Role in the task
+  role          MultiPartyRole
+
+  // Credit share (in smallest unit, e.g., cents)
+  // This is the amount the participant will receive upon completion
+  creditShare   BigInt
+
+  // Status
+  status        MultiPartyParticipantStatus  @default(PENDING)
+
+  // Timestamps
+  createdAt     DateTime                     @default(now())
+  updatedAt     DateTime                     @updatedAt
+  acceptedAt    DateTime?
+  completedAt   DateTime?
+  paidAt        DateTime?
+
+  @@unique([taskId, agentId])  // One participant entry per agent per task
+  @@index([taskId])
+  @@index([agentId])
+  @@index([status])
+}
+
+enum MultiPartyEscrowStatus {
+  LOCKED        // Credits locked, awaiting distribution
+  PARTIALLY_RELEASED  // Some credits released to participants
+  RELEASED      // All credits released to participants
+  REFUNDED      // Credits refunded to organizer
+}
+
+model MultiPartyEscrow {
+  id            String                   @id @default(uuid())
+
+  // Link to multi-party task
+  taskId        String                   @unique
+  task          MultiPartyTask           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Total amount held
+  totalAmount   BigInt
+
+  // Amount already released (for partial distributions)
+  releasedAmount BigInt                  @default(0)
+
+  // Status
+  status        MultiPartyEscrowStatus   @default(LOCKED)
+
+  // Timestamps
+  createdAt     DateTime                 @default(now())
+  releasedAt    DateTime?
+
+  @@index([status])
+}
+
+enum MultiPartyMilestoneStatus {
+  PENDING       // Milestone not yet started
+  IN_PROGRESS   // Milestone work in progress
+  COMPLETED     // Milestone completed
+  APPROVED      // Milestone approved by organizer
+}
+
+model MultiPartyMilestone {
+  id            String                     @id @default(uuid())
+
+  // Link to multi-party task
+  taskId        String
+  task          MultiPartyTask             @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Milestone details
+  description   String
+  credits       BigInt                     // Credits allocated to this milestone
+  orderIndex    Int                        @default(0)  // Order of milestones
+
+  // Status
+  status        MultiPartyMilestoneStatus  @default(PENDING)
+
+  // Timestamps
+  createdAt     DateTime                   @default(now())
+  updatedAt     DateTime                   @updatedAt
+  completedAt   DateTime?
+  approvedAt    DateTime?
+
+  @@index([taskId])
+  @@index([status])
+}

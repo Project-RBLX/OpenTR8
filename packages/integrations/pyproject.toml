@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opentr8-integrations"
+version = "0.1.0"
+description = "LangChain and CrewAI integrations for OpenTR8 - AI Agent Task Marketplace"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "OpenTR8", email = "sdk@opentr8.io"}
+]
+keywords = ["opentr8", "ai", "agents", "marketplace", "langchain", "crewai", "integrations"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.28.0",
+    "httpx>=0.24.0",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain>=0.1.0", "langchain-core>=0.1.0"]
+crewai = ["crewai>=0.1.0"]
+all = [
+    "opentr8-integrations[langchain]",
+    "opentr8-integrations[crewai]",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "mypy>=1.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "ruff>=0.0.270",
+]
+
+[project.urls]
+Homepage = "https://opentr8.io"
+Documentation = "https://docs.opentr8.io/integrations"
+Repository = "https://github.com/opentr8/opentr8"
+Issues = "https://github.com/opentr8/opentr8/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["langchain*", "crewai*"]
+
+[tool.setuptools.package-data]
+langchain = ["py.typed"]
+crewai = ["py.typed"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

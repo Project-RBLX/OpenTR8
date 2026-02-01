@@ -1,0 +1,102 @@
+# =============================================================================
+# OpenTR8 Docker Compose - Development Overrides
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database (development settings)
+  # ---------------------------------------------------------------------------
+  postgres:
+    ports:
+      - "5432:5432"  # Always expose in dev
+
+  # ---------------------------------------------------------------------------
+  # API Service (development mode with hot reload)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      target: base
+    container_name: opentr8-api-dev
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/opentr8?schema=public
+      PORT: "3000"
+      NODE_ENV: development
+      INITIAL_AGENT_CREDITS: "10000"
+      DEFAULT_TASK_TIMEOUT_HOURS: "72"
+    volumes:
+      # Mount source code for hot reload
+      - ./apps/api/src:/app/apps/api/src:ro
+      - ./packages/database/src:/app/packages/database/src:ro
+      - ./packages/database/prisma:/app/packages/database/prisma:ro
+      - ./packages/shared/src:/app/packages/shared/src:ro
+      # Exclude node_modules from volume mounts
+      - api_node_modules:/app/apps/api/node_modules
+      - database_node_modules:/app/packages/database/node_modules
+      - shared_node_modules:/app/packages/shared/node_modules
+    ports:
+      - "3000:3000"
+      - "9229:9229"  # Node.js debugger port
+    command: >
+      sh -c "
+        pnpm install &&
+        pnpm --filter @opentr8/database db:generate &&
+        cd packages/database && npx prisma migrate deploy && cd ../.. &&
+        pnpm --filter @opentr8/api dev
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Escrow Service (development mode with hot reload)
+  # ---------------------------------------------------------------------------
+  escrow-service:
+    build:
+      context: .
+      target: base
+    container_name: opentr8-escrow-service-dev
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/opentr8?schema=public
+      NODE_ENV: development
+      DEFAULT_TASK_TIMEOUT_HOURS: "72"
+    volumes:
+      # Mount source code for hot reload
+      - ./apps/escrow-service/src:/app/apps/escrow-service/src:ro
+      - ./packages/database/src:/app/packages/database/src:ro
+      - ./packages/database/prisma:/app/packages/database/prisma:ro
+      - ./packages/shared/src:/app/packages/shared/src:ro
+      # Exclude node_modules from volume mounts
+      - escrow_node_modules:/app/apps/escrow-service/node_modules
+      - database_node_modules:/app/packages/database/node_modules
+      - shared_node_modules:/app/packages/shared/node_modules
+    ports:
+      - "9230:9229"  # Node.js debugger port (different from api)
+    command: >
+      sh -c "
+        pnpm install &&
+        pnpm --filter @opentr8/database db:generate &&
+        pnpm --filter @opentr8/escrow-service dev
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # Disable migration service in dev (handled by apps)
+  # ---------------------------------------------------------------------------
+  db-migrate:
+    profiles:
+      - disabled
+
+# -----------------------------------------------------------------------------
+# Development Volumes (for node_modules isolation)
+# -----------------------------------------------------------------------------
+volumes:
+  api_node_modules:
+  escrow_node_modules:
+  database_node_modules:
+  shared_node_modules:

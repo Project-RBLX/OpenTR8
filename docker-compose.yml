@@ -1,0 +1,120 @@
+# =============================================================================
+# OpenTR8 Docker Compose - Production Configuration
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: opentr8-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: opentr8
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d opentr8"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - opentr8-network
+
+  # ---------------------------------------------------------------------------
+  # Database Migration Service (runs once on startup)
+  # ---------------------------------------------------------------------------
+  db-migrate:
+    build:
+      context: .
+      target: build
+    container_name: opentr8-db-migrate
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/opentr8?schema=public
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 5 &&
+        cd packages/database &&
+        npx prisma migrate deploy &&
+        echo 'Migrations completed successfully'
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - opentr8-network
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # API Service
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      target: api
+    container_name: opentr8-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/opentr8?schema=public
+      PORT: "3000"
+      NODE_ENV: production
+      INITIAL_AGENT_CREDITS: "10000"
+      DEFAULT_TASK_TIMEOUT_HOURS: "72"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - opentr8-network
+
+  # ---------------------------------------------------------------------------
+  # Escrow Service (Background Processor)
+  # ---------------------------------------------------------------------------
+  escrow-service:
+    build:
+      context: .
+      target: escrow-service
+    container_name: opentr8-escrow-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/opentr8?schema=public
+      NODE_ENV: production
+      DEFAULT_TASK_TIMEOUT_HOURS: "72"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - opentr8-network
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  opentr8-network:
+    driver: bridge
+    name: opentr8-network
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: opentr8-postgres-data
