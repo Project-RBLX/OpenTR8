@@ -3,7 +3,7 @@
 # ============================================
 # Base stage - shared between build and runtime
 # ============================================
-FROM node:20-alpine AS base
+FROM node:25-alpine AS base
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@9 --activate
@@ -52,7 +52,7 @@ RUN pnpm prune --prod
 # ============================================
 # Production stage - minimal runtime image
 # ============================================
-FROM node:20-alpine AS runner
+FROM node:25-alpine AS runner
 
 # Security: run as non-root user
 RUN addgroup --system --gid 1001 nodejs && \
